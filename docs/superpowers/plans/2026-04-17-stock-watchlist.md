@@ -38,6 +38,7 @@
 | `src/test/resources/application-test.yml` | 测试配置 |
 | `src/test/resources/schema-h2.sql` | H2 测试数据库建表脚本 |
 | `src/test/java/com/watchlist/mapper/StockMapperTest.java` | Mapper 层测试 |
+| `src/test/java/com/watchlist/service/SinaStockApiTest.java` | 新浪 API 解析逻辑测试 |
 | `src/test/java/com/watchlist/service/StockServiceTest.java` | Service 层测试 |
 | `src/test/java/com/watchlist/controller/StockControllerTest.java` | Controller 层测试 |
 | `Dockerfile` | 应用容器镜像定义 |
@@ -392,11 +393,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest
 @ActiveProfiles("test") // 使用 application-test.yml，连接 H2 而非 MySQL
+@Transactional // 每个测试结束后自动回滚，保证测试之间数据隔离
 class StockMapperTest {
 
     @Autowired
@@ -839,8 +842,11 @@ public class SinaStockApi {
         ResponseEntity<byte[]> response = restTemplate.exchange(
                 url, HttpMethod.GET, entity, byte[].class);
 
+        byte[] bytes = response.getBody();
+        if (bytes == null) return Collections.emptyList();
+
         // 新浪返回 GBK 编码，手动转换
-        String body = new String(response.getBody(), Charset.forName("GBK"));
+        String body = new String(bytes, Charset.forName("GBK"));
         return parseQuoteResponse(body);
     }
 
@@ -865,7 +871,10 @@ public class SinaStockApi {
         ResponseEntity<byte[]> response = restTemplate.exchange(
                 url, HttpMethod.GET, entity, byte[].class);
 
-        String body = new String(response.getBody(), Charset.forName("GBK"));
+        byte[] bytes = response.getBody();
+        if (bytes == null) return Collections.emptyList();
+
+        String body = new String(bytes, Charset.forName("GBK"));
         return parseSearchResponse(body);
     }
 
@@ -948,7 +957,102 @@ public class SinaStockApi {
 }
 ```
 
-- [ ] **Step 3: 手动验证新浪 API 可用性**
+- [ ] **Step 3: 编写 SinaStockApi 解析逻辑单元测试**
+
+```java
+// src/test/java/com/watchlist/service/SinaStockApiTest.java
+package com.watchlist.service;
+
+import com.watchlist.dto.StockQuoteVO;
+import com.watchlist.dto.StockSearchVO;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Method;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class SinaStockApiTest {
+
+    /**
+     * 通过反射调用 private 解析方法进行测试
+     */
+    private List<StockQuoteVO> invokeParseQuote(SinaStockApi api, String body) throws Exception {
+        Method method = SinaStockApi.class.getDeclaredMethod("parseQuoteResponse", String.class);
+        method.setAccessible(true);
+        return (List<StockQuoteVO>) method.invoke(api, body);
+    }
+
+    private List<StockSearchVO> invokeParseSearch(SinaStockApi api, String body) throws Exception {
+        Method method = SinaStockApi.class.getDeclaredMethod("parseSearchResponse", String.class);
+        method.setAccessible(true);
+        return (List<StockSearchVO>) method.invoke(api, body);
+    }
+
+    @Test
+    void parseQuoteResponse_normal() throws Exception {
+        SinaStockApi api = new SinaStockApi(null);
+        String body = "var hq_str_sh600519=\"贵州茅台,1688.00,1682.00,1690.00,1695.00,1680.00,1689.00,1690.00,12345678,20000000000.00,\";\n";
+
+        List<StockQuoteVO> result = invokeParseQuote(api, body);
+
+        assertEquals(1, result.size());
+        assertEquals("600519", result.get(0).getStockCode());
+        assertEquals("贵州茅台", result.get(0).getStockName());
+        assertEquals(1690.00, result.get(0).getCurrentPrice());
+        assertEquals(12345678L, result.get(0).getVolume());
+    }
+
+    @Test
+    void parseQuoteResponse_emptyData() throws Exception {
+        SinaStockApi api = new SinaStockApi(null);
+        String body = "var hq_str_sh999999=\"\";\n";
+
+        List<StockQuoteVO> result = invokeParseQuote(api, body);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void parseSearchResponse_normal() throws Exception {
+        SinaStockApi api = new SinaStockApi(null);
+        String body = "var suggestvalue=\"11,sh600519,贵州茅台,贵州茅台,gzmt;11,sz000858,五粮液,五粮液,wly\";";
+
+        List<StockSearchVO> result = invokeParseSearch(api, body);
+
+        assertEquals(2, result.size());
+        assertEquals("600519", result.get(0).getStockCode());
+        assertEquals("贵州茅台", result.get(0).getStockName());
+        assertEquals("000858", result.get(1).getStockCode());
+    }
+
+    @Test
+    void parseSearchResponse_empty() throws Exception {
+        SinaStockApi api = new SinaStockApi(null);
+        String body = "var suggestvalue=\"\";";
+
+        List<StockSearchVO> result = invokeParseSearch(api, body);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void getExchangePrefix_allCases() {
+        assertEquals("sh", SinaStockApi.getExchangePrefix("600519"));
+        assertEquals("sz", SinaStockApi.getExchangePrefix("000001"));
+        assertEquals("sz", SinaStockApi.getExchangePrefix("300750"));
+        assertEquals("bj", SinaStockApi.getExchangePrefix("430047"));
+        assertEquals("bj", SinaStockApi.getExchangePrefix("830799"));
+    }
+}
+```
+
+- [ ] **Step 4: 运行 SinaStockApi 测试**
+
+```bash
+mvn test -Dtest=SinaStockApiTest -pl .
+# 期望：5 个测试全部 PASS
+```
+
+- [ ] **Step 5: 手动验证新浪 API 可用性**
 
 ```bash
 # 测试行情接口
@@ -960,11 +1064,11 @@ curl -H "Referer: https://finance.sina.com.cn" "https://suggest3.sinajs.cn/sugge
 # 期望返回含 "600519" 和 "贵州茅台" 的数据
 ```
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
-git add src/main/java/com/watchlist/config/ src/main/java/com/watchlist/service/SinaStockApi.java
-git commit -m "feat: 添加 RestTemplate 配置和新浪行情 API 客户端"
+git add src/main/java/com/watchlist/config/ src/main/java/com/watchlist/service/SinaStockApi.java src/test/java/com/watchlist/service/SinaStockApiTest.java
+git commit -m "feat: 添加 RestTemplate 配置和新浪行情 API 客户端（含解析测试）"
 ```
 
 ---
@@ -1203,18 +1307,22 @@ public class StockServiceImpl implements StockService {
 
     @Override
     public List<StockSearchVO> searchStocks(String keyword) {
-        if (keyword.matches("^\\d{6}$")) {
-            // 精确 6 位代码：直接查行情验证是否存在
-            List<StockQuoteVO> quotes = sinaStockApi.getQuotes(
-                    Collections.singletonList(keyword));
-            return quotes.stream().map(q -> {
-                StockSearchVO vo = new StockSearchVO();
-                vo.setStockCode(q.getStockCode());
-                vo.setStockName(q.getStockName());
-                return vo;
-            }).collect(Collectors.toList());
+        if (keyword.matches("^[03468]\\d{5}$")) {
+            // 合法的 6 位代码：直接查行情验证是否存在
+            try {
+                List<StockQuoteVO> quotes = sinaStockApi.getQuotes(
+                        Collections.singletonList(keyword));
+                return quotes.stream().map(q -> {
+                    StockSearchVO vo = new StockSearchVO();
+                    vo.setStockCode(q.getStockCode());
+                    vo.setStockName(q.getStockName());
+                    return vo;
+                }).collect(Collectors.toList());
+            } catch (Exception e) {
+                return Collections.emptyList();
+            }
         }
-        // 其他情况：走新浪搜索/建议接口
+        // 其他情况：走新浪搜索/建议接口（含部分数字、中文、字母）
         return sinaStockApi.search(keyword);
     }
 
@@ -1393,7 +1501,25 @@ class StockControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(400));
+                .andExpect(jsonPath("$.code").value(400))
+                .andExpect(jsonPath("$.message").isNotEmpty());
+    }
+
+    @Test
+    void updateStock_returnsUpdatedStock() throws Exception {
+        Stock stock = new Stock();
+        stock.setId(1L);
+        stock.setStockCode("600519");
+        stock.setStockName("贵州茅台");
+        stock.setNotes("核心持仓");
+
+        when(stockService.updateStock(any(Long.class), any())).thenReturn(stock);
+
+        mockMvc.perform(put("/api/stocks/1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"notes\":\"核心持仓\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.notes").value("核心持仓"));
     }
 
     @Test
@@ -1503,14 +1629,14 @@ public class StockController {
 
 ```bash
 mvn test -Dtest=StockControllerTest -pl .
-# 期望：6 个测试全部 PASS
+# 期望：7 个测试全部 PASS
 ```
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add src/main/java/com/watchlist/controller/ src/test/java/com/watchlist/controller/
-git commit -m "feat: 添加 StockController，6 个 REST API 端点全部通过测试"
+git commit -m "feat: 添加 StockController，6 个 REST API 端点全部通过测试（7 个测试用例）"
 ```
 
 ---
@@ -1593,7 +1719,7 @@ curl -s "http://localhost:8080/api/quotes?codes=600519,000001" | python3 -m json
 
 ```bash
 mvn test
-# 期望：所有测试 PASS（Mapper 3 + Service 5 + Controller 6 = 14 个测试）
+# 期望：所有测试 PASS（Mapper 3 + SinaApi 5 + Service 5 + Controller 7 = 20 个测试）
 ```
 
 - [ ] **Step 9: 提交（如有修复）**
@@ -1635,7 +1761,8 @@ COPY target/stock-watchlist-1.0.0.jar app.jar
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "app.jar", "--spring.profiles.active=docker"]
+# profile 由 docker-compose 的环境变量控制，不在这里硬编码
+ENTRYPOINT ["java", "-jar", "app.jar"]
 ```
 
 - [ ] **Step 3: 创建 docker-compose.yml**
@@ -1650,7 +1777,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     environment:
       - SPRING_PROFILES_ACTIVE=docker
     restart: unless-stopped
@@ -1664,6 +1792,11 @@ services:
       - mysql_data:/var/lib/mysql
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
     # 不映射端口到宿主机，仅内部网络可访问
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
 volumes:
@@ -1721,22 +1854,28 @@ git commit -m "feat: 添加 Dockerfile 和 docker-compose.yml 部署配置"
 - SSH 登录方式（密码或密钥）
 - 服务器上是否已安装 Docker
 
-- [ ] **Step 2: 上传项目到服务器**
+- [ ] **Step 2: 在服务器上创建目录结构**
+
+```bash
+ssh root@YOUR_SERVER_IP "mkdir -p /opt/stock-watchlist/{target,sql,src/main/resources}"
+```
+
+- [ ] **Step 3: 上传项目到服务器**
 
 ```bash
 # 先本地打包
 cd /Users/lei_yang/Desktop/project/java-mine
 mvn clean package -DskipTests
 
-# 将必要文件上传到服务器（替换 YOUR_SERVER_IP）
-scp -r Dockerfile docker-compose.yml sql/ target/stock-watchlist-1.0.0.jar \
-  src/main/resources/application.yml src/main/resources/application-docker.yml \
-  root@YOUR_SERVER_IP:/opt/stock-watchlist/
+# 上传文件，保持与 Dockerfile 中路径一致（COPY target/xxx.jar）
+scp Dockerfile docker-compose.yml root@YOUR_SERVER_IP:/opt/stock-watchlist/
+scp sql/init.sql root@YOUR_SERVER_IP:/opt/stock-watchlist/sql/
+scp target/stock-watchlist-1.0.0.jar root@YOUR_SERVER_IP:/opt/stock-watchlist/target/
+scp src/main/resources/application.yml src/main/resources/application-docker.yml \
+  root@YOUR_SERVER_IP:/opt/stock-watchlist/src/main/resources/
 ```
 
-> 注意：需要在服务器上先创建 `/opt/stock-watchlist/` 目录并保持与本地相同的文件结构。更简便的方式是上传整个项目目录或将 JAR 放到与 Dockerfile 同级。
-
-- [ ] **Step 3: 在服务器上启动**
+- [ ] **Step 4: 在服务器上启动**
 
 ```bash
 ssh root@YOUR_SERVER_IP
@@ -1747,14 +1886,14 @@ docker compose logs -f app
 # Ctrl+C 退出日志查看
 ```
 
-- [ ] **Step 4: 配置阿里云安全组**
+- [ ] **Step 5: 配置阿里云安全组**
 
 在阿里云控制台：
 1. 进入 ECS 实例 → 安全组
 2. 添加入方向规则：端口 8080，协议 TCP，授权对象 0.0.0.0/0
 3. 保存
 
-- [ ] **Step 5: 验证公网访问**
+- [ ] **Step 6: 验证公网访问**
 
 ```bash
 # 替换 YOUR_SERVER_IP
@@ -1765,7 +1904,7 @@ curl -s "http://YOUR_SERVER_IP:8080/api/stocks/search?keyword=茅台" | python3 
 # 期望：返回搜索结果
 ```
 
-- [ ] **Step 6: 提交最终状态**
+- [ ] **Step 7: 提交最终状态**
 
 ```bash
 git add -A
