@@ -64,8 +64,12 @@ CREATE TABLE stock_watchlist (
 ```
 
 股票代码只存 6 位数字，调用新浪 API 时根据首位数字自动推导交易所前缀：
-- `6` 开头 → `sh`（上海）
+- `6` 开头 → `sh`（上海，含科创板 688xxx）
 - `0` 或 `3` 开头 → `sz`（深圳）
+- `4` 或 `8` 开头 → `bj`（北交所）
+- 其他首位数字 → 抛出参数异常，拒绝添加
+
+参数校验层额外限制：stockCode 首位必须为 `0/3/4/6/8` 之一。
 
 ## API 设计
 
@@ -86,13 +90,16 @@ CREATE TABLE stock_watchlist (
 - 入参：无
 - 出参：`Result<List<StockQuoteVO>>`
 - 逻辑：查数据库获取所有自选股 → 批量调新浪 API 获取行情 → 拼接返回
+- 降级：若新浪 API 调用失败（超时/不可用），仍返回自选股列表，行情字段置为 null
 
 #### 2. POST /api/stocks — 添加自选股
 
-- 入参：`StockAddRequest { stockCode, stockName, notes? }`
+- 入参：`StockAddRequest { stockCode, notes? }`
 - 出参：`Result<Stock>`
+- 逻辑：根据 stockCode 调用新浪 API 自动获取 stockName，无需用户手动填写
 - 校验：
-  - stockCode 格式匹配 `^\d{6}$`
+  - stockCode 格式匹配 `^\d{6}$`，且首位为 `0/3/4/6/8`
+  - 调新浪 API 验证代码有效（能查到行情）
   - 不能重复添加（Service 层检查 + 数据库 UNIQUE 兜底）
 
 #### 3. PUT /api/stocks/{id} — 修改备注
@@ -124,7 +131,7 @@ CREATE TABLE stock_watchlist (
   "yesterdayClose": 1682.00,
   "high": 1695.00,
   "low": 1680.00,
-  "volume": 12345678,
+  "volume": 12345678,          // Long 类型，成交量可能很大
   "notes": "长期持有",
   "id": 1
 }
@@ -158,8 +165,10 @@ var hq_str_sh600519="贵州茅台,1688.00,1682.00,1690.00,1695.00,1680.00,...";
 
 ```
 容器 1: app (Spring Boot)  ──内部网络──▶  容器 2: mysql (MySQL 8.0)
-         ↕ 端口 8080                              ↕ 端口 3306
+         ↕ 端口 8080                              端口 3306 仅内部网络
       宿主机 8080                              volume 持久化
+
+> MySQL 端口不映射到宿主机，仅 app 容器通过 Docker 内部网络访问，避免数据库暴露。
 ```
 
 ### 配置分离
@@ -192,7 +201,7 @@ var hq_str_sh600519="贵州茅台,1688.00,1682.00,1690.00,1695.00,1680.00,...";
 
 ## 参数校验
 
-- stock_code：正则 `^\d{6}$`
+- stock_code：正则 `^\d{6}$`，且首位为 `0/3/4/6/8`
 - 重复添加：Service 层查询 + 数据库 UNIQUE 约束双重保障
 - id 存在性：修改和删除前检查
 
@@ -202,4 +211,5 @@ var hq_str_sh600519="贵州茅台,1688.00,1682.00,1690.00,1695.00,1680.00,...";
 - 参数校验失败 → code 400
 - 资源不存在 → code 404
 - 重复添加 → code 409
+- 外部 API 调用失败 → code 502
 - 服务器内部错误 → code 500
