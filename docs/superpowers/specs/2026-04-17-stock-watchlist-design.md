@@ -40,6 +40,7 @@ src/main/java/com/watchlist/
 ├── dto/                 ← 接口入参/出参定义
 │   ├── StockAddRequest.java
 │   ├── StockUpdateRequest.java
+│   ├── StockSearchVO.java
 │   └── StockQuoteVO.java
 ├── common/              ← 统一响应格式、异常处理
 │   └── Result.java
@@ -92,7 +93,17 @@ CREATE TABLE stock_watchlist (
 - 逻辑：查数据库获取所有自选股 → 批量调新浪 API 获取行情 → 拼接返回
 - 降级：若新浪 API 调用失败（超时/不可用），仍返回自选股列表，行情字段置为 null
 
-#### 2. POST /api/stocks — 添加自选股
+#### 2. GET /api/stocks/search?keyword=xxx — 搜索股票
+
+- 入参：query 参数 keyword（股票名称或代码）
+- 出参：`Result<List<StockSearchVO>>`
+- 逻辑：
+  - 若 keyword 为纯数字 → 按代码精确匹配（调新浪 API 查询该代码）
+  - 若 keyword 含中文/字母 → 按名称模糊匹配（通过新浪股票搜索接口）
+- 返回候选列表，每项包含 stockCode + stockName，供用户选择后调用添加接口
+- StockSearchVO: `{ stockCode, stockName }`
+
+#### 3. POST /api/stocks — 添加自选股
 
 - 入参：`StockAddRequest { stockCode, notes? }`
 - 出参：`Result<Stock>`
@@ -101,20 +112,21 @@ CREATE TABLE stock_watchlist (
   - stockCode 格式匹配 `^\d{6}$`，且首位为 `0/3/4/6/8`
   - 调新浪 API 验证代码有效（能查到行情）
   - 不能重复添加（Service 层检查 + 数据库 UNIQUE 兜底）
+- 典型使用流程：先调搜索接口找到股票 → 再用返回的 stockCode 调此接口添加
 
-#### 3. PUT /api/stocks/{id} — 修改备注
+#### 4. PUT /api/stocks/{id} — 修改备注
 
 - 入参：`StockUpdateRequest { notes }`
 - 出参：`Result<Stock>`
 - 校验：id 必须存在
 
-#### 4. DELETE /api/stocks/{id} — 删除自选股
+#### 5. DELETE /api/stocks/{id} — 删除自选股
 
 - 入参：路径参数 id
 - 出参：`Result<Void>`
 - 校验：id 必须存在
 
-#### 5. GET /api/quotes?codes=600519,000001 — 批量获取实时行情
+#### 6. GET /api/quotes?codes=600519,000001 — 批量获取实时行情
 
 - 入参：query 参数 codes（逗号分隔的股票代码）
 - 出参：`Result<List<StockQuoteVO>>`
